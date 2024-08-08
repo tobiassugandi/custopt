@@ -3,7 +3,7 @@ from torch.optim import Optimizer
 from torch.func import vmap
 from functools import reduce
 
-from line_search import _armijo
+from .line_search import _armijo
 
 class NysOpt(Optimizer):
     """Base Class of optimizers that use Nyström preconditioning.
