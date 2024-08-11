@@ -2,15 +2,7 @@ import torch
 from torch.optim import Optimizer
 from torch.func import vmap
 from functools import reduce
-
-def _armijo(f, x, gx, dx, t, alpha=0.1, beta=0.5):
-    """Line search to find a step size that satisfies the Armijo condition."""
-    f0 = f(x, 0, dx)
-    f1 = f(x, t, dx)
-    while f1 > f0 + alpha * t * gx.dot(dx):
-        t *= beta
-        f1 = f(x, t, dx)
-    return t
+from .line_search import _armijo
 
 def _apply_nys_precond_inv(U, S_mu_inv, mu, lambd_r, x):
     """Applies the inverse of the Nystrom approximation of the Hessian to a vector."""
@@ -37,13 +29,13 @@ def _nystrom_pcg(hess, b, x, mu, U, S, r, tol, max_iters):
     while torch.norm(resid) > tol and i < max_iters:
         v = hess(p) + mu * p
         with torch.no_grad():
-            alpha = torch.dot(resid, z) / torch.dot(p, v)
+            alpha = torch.vdot(resid, z) / torch.vdot(p, v)
             x += alpha * p
 
-            rTz = torch.dot(resid, z)
+            rTz = torch.vdot(resid, z)
             resid -= alpha * v
             z = _apply_nys_precond_inv(U, S_mu_inv, mu, lambd_r, resid)
-            beta = torch.dot(resid, z) / rTz
+            beta = torch.vdot(resid, z) / rTz
 
             p = z + beta * p
 
@@ -122,10 +114,6 @@ class NysNewtonCG(Optimizer):
             closure (callable, optional): A closure that reevaluates the model and returns (i) the loss and (ii) gradient w.r.t. the parameters.
             The closure can compute the gradient w.r.t. the parameters by calling torch.autograd.grad on the loss with create_graph=True.
         """
-        if self.n_iters == 0:
-            # Store the previous direction for warm starting PCG
-            self.old_dir = torch.zeros(
-                self._numel(), device=self._params[0].device)
 
         # NOTE: The closure must return both the loss and the gradient
         loss = None
@@ -133,7 +121,12 @@ class NysNewtonCG(Optimizer):
             with torch.enable_grad():
                 loss, grad_tuple = closure()
 
-        g = torch.cat([grad.view(-1) for grad in grad_tuple if grad is not None])
+        g = torch.cat([grad.reshape(-1) for grad in grad_tuple if grad is not None])
+        
+        if self.n_iters == 0:
+            # Store the previous direction for warm starting PCG
+            self.old_dir = torch.zeros(
+                self._numel(), device=self._params[0].device, dtype = g.dtype)
 
         # One step update
         for group_idx, group in enumerate(self.param_groups):
@@ -148,7 +141,7 @@ class NysNewtonCG(Optimizer):
             self.old_dir = d
 
             # Check if d is a descent direction
-            if torch.dot(d, g) <= 0:
+            if torch.vdot(d, g).real <= 0:
                 print("Warning: d is not a descent direction")
 
             if self.line_search_fn == 'armijo':
@@ -171,7 +164,7 @@ class NysNewtonCG(Optimizer):
             ls = 0
             for p in group['params']:
                 np = torch.numel(p)
-                dp = d[ls:ls+np].view(p.shape)
+                dp = d[ls:ls+np].reshape(p.shape)
                 ls += np
                 p.data.add_(-dp, alpha=t)
 
@@ -188,13 +181,14 @@ class NysNewtonCG(Optimizer):
         """
 
         # Flatten and concatenate the gradients
-        gradsH = torch.cat([gradient.view(-1)
+        gradsH = torch.cat([gradient.reshape(-1)
                            for gradient in grad_tuple if gradient is not None])
+        print(f'gradsH dtype: {gradsH.dtype}')
 
         # Generate test matrix (NOTE: This is transposed test matrix)
         p = gradsH.shape[0]
         Phi = torch.randn(
-            (self.rank, p), device=gradsH.device) / (p ** 0.5)
+            (self.rank, p), device=gradsH.device, dtype=gradsH.dtype) / (p ** 0.5)
         Phi = torch.linalg.qr(Phi.t(), mode='reduced')[0].t()
 
         Y = self._hvp_vmap(gradsH, self._params_list)(Phi)
@@ -210,24 +204,50 @@ class NysNewtonCG(Optimizer):
         # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
         try:
             C = torch.linalg.cholesky(choleskytarget)
+            success = True
         except:
             # eigendecomposition, eigenvalues and eigenvector matrix
             eigs, eigvectors = torch.linalg.eigh(choleskytarget)
-            shift = shift + torch.abs(torch.min(eigs))
-            # add shift to eigenvalues
-            eigs = eigs + shift
-            # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
-            C = torch.linalg.cholesky(
-                torch.mm(eigvectors, torch.mm(torch.diag(eigs), eigvectors.T)))
-
-        try:
-            B = torch.linalg.solve_triangular(
-                C, Y_shifted, upper=False, left=True)
-        # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
-        except:
-            B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
-                'cpu'), upper=False, left=True).to(C.device)
+            # print(f'eigs, eigvectors dtype: {eigs.dtype}, {eigvectors.dtype}')
             
+            attempt = 0
+            max_attempt = 1
+            success = False 
+            initial_shift = shift 
+
+            while not success and attempt < max_attempt:
+                try:
+                    shift = initial_shift + (2 ** attempt) * torch.abs(torch.min(eigs))
+                    # add shift to eigenvalues
+                    eigs = eigs + shift
+                    # print(f'eigs, shift dtype: {eigs.dtype}, {shift.dtype}')
+                    
+                    # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
+                    C = torch.linalg.cholesky(
+                        torch.mm(eigvectors, torch.mm(torch.diag(eigs.to(eigvectors.dtype)), eigvectors.T)))
+
+                    success = True 
+
+                except:
+                    attempt += 1
+                    # raise RuntimeError("Cholesky decomposition failed after maximum attempts with adjustments.")
+        
+        if not success:
+            print("---Cholesky failed---")
+            B = torch.mm(Y_shifted.t(), 
+                         torch.mm(eigvectors, torch.mm(torch.diag((eigs ** (-0.5)).to(eigvectors.dtype)), eigvectors.T))
+                         ).t()
+
+        else:
+            try:
+                B = torch.linalg.solve_triangular(
+                    C, Y_shifted, upper=False, left=True)
+            except:
+                # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
+                B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
+                    'cpu'), upper=False, left=True).to(C.device)
+
+
         # B = V * S * U^T b/c we have been using transposed sketch
         _, S, UT = torch.linalg.svd(B, full_matrices=False)
         self.U = UT.t()
@@ -242,7 +262,7 @@ class NysNewtonCG(Optimizer):
         return vmap(lambda v: self._hvp(grad_params, params, v), in_dims=0, chunk_size=self.chunk_size)
 
     def _hvp(self, grad_params, params, v):
-        Hv = torch.autograd.grad(grad_params, params, grad_outputs=v,
+        Hv = torch.autograd.grad(grad_params, params, grad_outputs=v.to(grad_params.dtype),
                                  retain_graph=True)
         Hv = tuple(Hvi.detach() for Hvi in Hv)
         return torch.cat([Hvi.reshape(-1) for Hvi in Hv])
@@ -259,7 +279,7 @@ class NysNewtonCG(Optimizer):
             numel = p.numel()
             # Avoid in-place operation by creating a new tensor
             p.data = p.data.add(
-                update[offset:offset + numel].view_as(p), alpha=step_size)
+                update[offset:offset + numel].reshape(p.size()), alpha=step_size)
             offset += numel
         assert offset == self._numel()
 
