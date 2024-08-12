@@ -23,11 +23,18 @@ class Precond_hessian():
 
     # pre-compute results needed for matrix-vector-products
     # compute components of tilde_H_k
-    history_size = len(optimizer.state_dict()["state"][0]['old_dirs'])
-    y_hist = optimizer.state_dict()["state"][0]['old_dirs']
-    s_hist = optimizer.state_dict()["state"][0]['old_stps']
-    rho_hist = optimizer.state_dict()["state"][0]['ro']
-    gamma = optimizer.state_dict()["state"][0]['H_diag']
+    try:
+      history_size = len(optimizer.state_dict()["state"][0]['old_dirs'])
+      y_hist = optimizer.state_dict()["state"][0]['old_dirs']
+      s_hist = optimizer.state_dict()["state"][0]['old_stps']
+      rho_hist = optimizer.state_dict()["state"][0]['ro']
+      gamma = optimizer.state_dict()["state"][0]['H_diag']
+    except:
+      history_size = len(optimizer.state_dict()["state"]['global_state']['old_dirs'])
+      y_hist    = [y.to(device) for y in optimizer.state_dict()["state"]['global_state']['old_dirs'] ]
+      s_hist    = [s.to(device) for s in optimizer.state_dict()["state"]['global_state']['old_stps'] ]
+      rho_hist  = [rho.to(device) for rho in optimizer.state_dict()["state"]['global_state']['rho'] ]
+      gamma     = optimizer.state_dict()["state"]['global_state']['H_diag'].to(device)
 
     tilde_v_vecs = [None] * history_size
     tilde_s_vecs = [None] * history_size
