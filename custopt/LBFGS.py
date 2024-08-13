@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 from functools import reduce
 from copy import deepcopy
 from torch.optim import Optimizer
-
+from custopt.nys_newton_cg import _apply_nys_precond_inv
+from custopt.nysopt import _update_preconditioner
 
 def is_legal(v):
     """
@@ -288,7 +289,7 @@ class LBFGS(Optimizer):
         
         return
 
-    def two_loop_recursion(self, vec):
+    def two_loop_recursion(self, vec, H0 = None):
         """
         Performs two-loop recursion on given vector to obtain Hv.
 
@@ -327,7 +328,13 @@ class LBFGS(Optimizer):
 
         # multiply by initial Hessian 
         # r/d is the final direction
-        r = torch.mul(q, H_diag)
+        if self.H0 is None:
+            r = torch.mul(q, H_diag)
+        else:
+            lambd_r     = self.S[self.nys_rank - 1]
+            S_mu_inv    = (self.S + self.nys_mu) ** (-1)
+            r = _apply_nys_precond_inv(self.U, S_mu_inv, self.nys_mu, lambd_r, q)
+
         for i in range(num_old):
             beta = old_stps[i].dot(r) * rho[i]
             r.add_(old_dirs[i], alpha = alpha[i] - beta)
@@ -397,19 +404,20 @@ class LBFGS(Optimizer):
                 old_stps.append(y)
     
                 # update scale of initial Hessian approximation
-                H_diag = ys / y.dot(y)  # (y*y)
+                # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
+                H_diag = ys / y.dot(y)  # (y*y) 
                 
                 state['old_dirs'] = old_dirs
                 state['old_stps'] = old_stps
                 state['H_diag'] = H_diag
 
-            else:
+            else: # doesn't satisfy Powell criteria (a proxy for sufficient progress), e.g. when using Armijo.
                 # save skip
                 state['curv_skips'] += 1
                 if debug:
                     print('Curvature pair skipped due to failed criterion')
 
-        else:
+        else: 
             # save skip
             state['fail_skips'] += 1
             if debug:
@@ -1004,9 +1012,21 @@ class FullBatchLBFGS(LBFGS):
     """
 
     def __init__(self, params, lr=1, history_size=10, line_search='Wolfe', 
-                 dtype=torch.float, debug=False):
+                 dtype=torch.float, debug=False, H0 = None, nys_mu = 1e-2, nys_rank=10):
         super(FullBatchLBFGS, self).__init__(params, lr, history_size, line_search, 
              dtype, debug)
+        
+        # nystrom initialization
+        self.H0             = H0
+        self.nys_chunk_size = 1
+        self.nys_verbose    = True
+        self.U              = None
+        self.S              = None
+        self.nys_mu         = nys_mu
+        self.nys_rank       = nys_rank
+        self._params_list   = list(self._params)
+        
+        # self.nysopt     = NysOpt(params, rank = nys_rank, mu = nys_mu)
 
     def step(self, options=None):
         """
@@ -1104,3 +1124,13 @@ class FullBatchLBFGS(LBFGS):
 
         # take step
         return self._step(p, grad, options=options)
+
+    def update_preconditioner(self, grad_tuple):
+        """Update the Nystrom approximation of the Hessian.
+
+        Args:
+            grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
+            This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
+        """
+        self.U, self.S = _update_preconditioner(grad_tuple, self.nys_rank, self._params_list, self.nys_chunk_size, self.nys_verbose)
+        
