@@ -255,7 +255,13 @@ class LBFGS(Optimizer):
         for p in self._params:
             numel = p.numel()
             # view as to avoid deprecated pointwise semantics
-            p.data.add_(update[offset:offset + numel].reshape(p.data.size()), alpha=step_size)
+            update_slice = update[offset:offset + numel].reshape(p.data.size())
+            if p.data.is_complex():
+                # Only add the real part of the update if p.data is real
+                p.data.add_(update_slice, alpha=step_size)
+            else:
+                p.data.add_(update_slice.real, alpha=step_size.real)
+            # p.data.add_(update[offset:offset + numel].reshape(p.data.size()), alpha=step_size)
             offset += numel
         assert offset == self._numel()
 
@@ -319,11 +325,11 @@ class LBFGS(Optimizer):
         alpha = state['alpha']
 
         for i in range(num_old):
-            rho[i] = 1. / old_stps[i].dot(old_dirs[i])
+            rho[i] = 1. / torch.vdot(old_stps[i], old_dirs[i])
 
         q = vec
         for i in range(num_old - 1, -1, -1):
-            alpha[i] = old_dirs[i].dot(q) * rho[i]
+            alpha[i] = torch.vdot(old_dirs[i], q) * rho[i]
             q.add_(old_stps[i], alpha = -alpha[i])
 
         # multiply by initial Hessian 
@@ -336,7 +342,7 @@ class LBFGS(Optimizer):
             r = _apply_nys_precond_inv(self.U, S_mu_inv, self.nys_mu, lambd_r, q)
 
         for i in range(num_old):
-            beta = old_stps[i].dot(r) * rho[i]
+            beta = torch.vdot(old_stps[i], r) * rho[i]
             r.add_(old_dirs[i], alpha = alpha[i] - beta)
 
         return r
@@ -380,14 +386,14 @@ class LBFGS(Optimizer):
             # compute y's
             y = flat_grad.sub(prev_flat_grad)
             s = d.mul(t)
-            sBs = s.dot(Bs)
-            ys = y.dot(s)  # y*s
+            sBs = torch.vdot(s, Bs)
+            ys = torch.vdot(y, s)  # y*s
 
             # update L-BFGS matrix
-            if ys > eps * sBs or damping == True:
+            if ys.real > eps * sBs.real or damping == True:
     
                 # perform Powell damping
-                if damping == True and ys < eps*sBs:
+                if damping == True and ys.real < eps*sBs.real:
                     if debug:
                         print('Applying Powell damping...')
                     theta = ((1 - eps) * sBs)/(sBs - ys)
@@ -405,7 +411,7 @@ class LBFGS(Optimizer):
     
                 # update scale of initial Hessian approximation
                 # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
-                H_diag = ys / y.dot(y)  # (y*y) 
+                H_diag = ys / torch.vdot(y, y)  # (y*y) 
                 
                 state['old_dirs'] = old_dirs
                 state['old_stps'] = old_stps
@@ -549,7 +555,7 @@ class LBFGS(Optimizer):
                     closure = options['closure']
 
                 if 'gtd' not in options.keys():
-                    gtd = g_Sk.dot(d)
+                    gtd = torch.vdot(g_Sk, d)
                 else:
                     gtd = options['gtd']
 
@@ -615,7 +621,7 @@ class LBFGS(Optimizer):
                 print('F(x): %.8e  g*d: %.8e' % (F_k, gtd))
 
             # check if search direction is descent direction
-            if gtd >= 0:
+            if gtd.real >= 0:
                 desc_dir = False
                 if debug:
                     print('Not a descent direction!')
@@ -637,7 +643,7 @@ class LBFGS(Optimizer):
                       % (ls_step, t, F_new, F_k + c1 * t * gtd, F_k))
 
             # check Armijo condition
-            while F_new > F_k + c1*t*gtd or not is_legal(F_new):
+            while F_new > F_k + c1*t.real*gtd.real or not is_legal(F_new):
 
                 # check if maximum number of iterations reached
                 if ls_step >= max_ls:
@@ -675,9 +681,9 @@ class LBFGS(Optimizer):
 
                     # if values are too extreme, adjust t
                     if interpolate:
-                        if t < 1e-3 * t_new:
+                        if t.real < 1e-3 * t_new.real:
                             t = 1e-3 * t_new
-                        elif t > 0.6 * t_new:
+                        elif t.real > 0.6 * t_new.real:
                             t = 0.6 * t_new
 
                         # store old point
@@ -736,7 +742,7 @@ class LBFGS(Optimizer):
                     F_k = options['current_loss']
 
                 if 'gtd' not in options.keys():
-                    gtd = g_Sk.dot(d)
+                    gtd = torch.vdot(g_Sk, d)
                 else:
                     gtd = options['gtd']
 
@@ -816,7 +822,7 @@ class LBFGS(Optimizer):
                 print('F(x): %.8e  g*d: %.8e' % (F_k, gtd))
 
             # check if search direction is descent direction
-            if gtd >= 0:
+            if gtd.real >= 0:
                 desc_dir = False
                 if debug:
                     print('Not a descent direction!')
@@ -859,7 +865,7 @@ class LBFGS(Optimizer):
                           % (F_new, F_k + c1 * t * gtd, F_k))
 
                 # check Armijo condition
-                if F_new > F_k + c1 * t * gtd:
+                if F_new > F_k + c1 * t.real * gtd.real:
 
                     # set upper bound
                     beta = t
@@ -879,7 +885,7 @@ class LBFGS(Optimizer):
                     F_new.backward()
                     g_new = self._gather_flat_grad()
                     grad_eval += 1
-                    gtd_new = g_new.dot(d)
+                    gtd_new = torch.vdot(g_new, d)
                     
                     # print info if debugging
                     if ls_debug:
@@ -887,7 +893,7 @@ class LBFGS(Optimizer):
                               % (gtd_new, c2 * gtd, gtd))
 
                     # check curvature condition
-                    if gtd_new < c2 * gtd:
+                    if gtd_new.real < c2 * gtd.real:
 
                         # set lower bound
                         alpha = t
@@ -916,18 +922,18 @@ class LBFGS(Optimizer):
 
                     # if values are too extreme, adjust t
                     if beta == float('Inf'):
-                        if t > 2 * eta * t_prev:
+                        if t.real > 2 * eta * t_prev.real:
                             t = 2 * eta * t_prev
-                        elif t < eta * t_prev:
+                        elif t.real < eta * t_prev.real:
                             t = eta * t_prev
                     else:
-                        if t < alpha + 0.2 * (beta - alpha):
+                        if t.real < alpha.real + 0.2 * (beta.real - alpha.real):
                             t = alpha + 0.2 * (beta - alpha)
-                        elif t > (beta - alpha) / 2.0:
+                        elif t.real > (beta.real - alpha.real) / 2.0:
                             t = (beta - alpha) / 2.0
 
                     # if we obtain nonsensical value from interpolation
-                    if t <= 0:
+                    if t.real <= 0:
                         t = (beta - alpha) / 2.0
 
                 # update parameters
