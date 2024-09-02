@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 from functools import reduce
 from copy import deepcopy
 from torch.optim import Optimizer
-from custopt.nys_newton_cg import _apply_nys_precond_inv
-from custopt.nysopt import _update_preconditioner
+# from custopt.nys_newton_cg import _apply_nys_precond_inv
+from custopt.nysopt import _update_preconditioner, _apply_nys_inv
 
 def is_legal(v):
     """
@@ -331,9 +331,9 @@ class LBFGS(Optimizer):
         if self.H0 is None:
             r = torch.mul(q, H_diag)
         else:
-            lambd_r     = self.S[self.nys_rank - 1]
-            S_mu_inv    = (self.S + self.nys_mu) ** (-1)
-            r = _apply_nys_precond_inv(self.U, S_mu_inv, self.nys_mu, lambd_r, q)
+            # lambd_r     = self.S[self.nys_rank - 1]
+            # S_mu_inv    = (self.S + self.nys_mu) ** (-1)
+            r = _apply_nys_inv(self.U, self.S, self.nys_mu, q)
 
         for i in range(num_old):
             beta = old_stps[i].dot(r) * rho[i]
