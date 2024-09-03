@@ -62,61 +62,69 @@ class Hessian():
   - loss_comp: string indicating which component of the loss to use (will use total loss for any value other than "res", "bc", or "ic")
   - device: string indicating which CUDA device to use (where both model and data reside)
   """
-  def __init__(self, model, data, loss_comp=None, device='cuda'):
+  def __init__(self, model, grad_tuple, device='cuda'):
     self.model = model.eval()
-    # self.pred_func = pred_func
-    # self.loss_func = loss_func
-    # self.x, self.t = data
     self.device = device
-
-
-    def compute_fourier_derivative(u, s=None, domain_length = 2 ):
-      if s is None:
-          s = u.shape[-1]
-          
-      # pad = 0
-      # padded = torch.nn.functional.pad(u, (pad,pad), mode='circular')
-
-      # Compute Fourier transform
-      output_fft = torch.fft.fft(u, dim=-1)
-
-      # Create the modes
-      k_max = s//2
-      k = torch.cat((torch.arange(start=0, end=k_max, step=1, device=u.device),
-                      torch.arange(start=-k_max, end=0, step=1, device=u.device)), 0).reshape(1,1,s)
-      k =k * 2j * torch.pi / domain_length
-
-      # Multiply with modes to compute derivative in the frequency domain
-      d_fft = k * output_fft
-      d2_fft = k ** 2  * output_fft 
-
-      # print(d_fft.shape, d2_fft.shape)    
-      du, d2u = torch.fft.irfft(d_fft, n=s, dim=-1), torch.fft.irfft(d2_fft, n=s, dim=-1)
-      du, d2u = du, d2u
-      # print(du.shape, d2u.shape)
-
-      return du, d2u
-    
-    l = torch.nn.L1Loss()
-    self.model.zero_grad()
-
-    input_batch, output_batch, out_data_std = data
-    output_pred_batch   = model(input_batch) 
-    loss_data           = l(output_pred_batch, output_batch) \
-                          + torch.nn.MSELoss()(output_pred_batch * 0, torch.zeros_like(output_pred_batch))  # second term ensures all model parameters are in the graph
-
-    out_ori             = output_pred_batch * out_data_std
-    du, d2u             = compute_fourier_derivative(out_ori)
-    declude             = 1
-    loss_pde            = l(-d2u[:, 0, declude:-declude], input_batch[:, 1, declude:-declude])
-
-    loss                = loss_data + loss_pde
-
-    grad_tuple = torch.autograd.grad(loss, self.model.parameters(), create_graph=True)
-
-        
     self.params = [param for param in self.model.parameters() if param.requires_grad]
     self.gradsH = [gradient if gradient is not None else 0.0 for gradient in grad_tuple]
+
+
+
+  # def __init__(self, model, data, loss_comp=None, device='cuda'):
+  #   self.model = model.eval()
+  #   # self.pred_func = pred_func
+  #   # self.loss_func = loss_func
+  #   # self.x, self.t = data
+  #   self.device = device
+
+
+  #   def compute_fourier_derivative(u, s=None, domain_length = 2 ):
+  #     if s is None:
+  #         s = u.shape[-1]
+          
+  #     # pad = 0
+  #     # padded = torch.nn.functional.pad(u, (pad,pad), mode='circular')
+
+  #     # Compute Fourier transform
+  #     output_fft = torch.fft.fft(u, dim=-1)
+
+  #     # Create the modes
+  #     k_max = s//2
+  #     k = torch.cat((torch.arange(start=0, end=k_max, step=1, device=u.device),
+  #                     torch.arange(start=-k_max, end=0, step=1, device=u.device)), 0).reshape(1,1,s)
+  #     k =k * 2j * torch.pi / domain_length
+
+  #     # Multiply with modes to compute derivative in the frequency domain
+  #     d_fft = k * output_fft
+  #     d2_fft = k ** 2  * output_fft 
+
+  #     # print(d_fft.shape, d2_fft.shape)    
+  #     du, d2u = torch.fft.irfft(d_fft, n=s, dim=-1), torch.fft.irfft(d2_fft, n=s, dim=-1)
+  #     du, d2u = du, d2u
+  #     # print(du.shape, d2u.shape)
+
+  #     return du, d2u
+    
+  #   l = torch.nn.L1Loss()
+  #   self.model.zero_grad()
+
+  #   input_batch, output_batch, out_data_std = data
+  #   output_pred_batch   = model(input_batch) 
+  #   loss_data           = l(output_pred_batch, output_batch) \
+  #                         + torch.nn.MSELoss()(output_pred_batch * 0, torch.zeros_like(output_pred_batch))  # second term ensures all model parameters are in the graph
+
+  #   out_ori             = output_pred_batch * out_data_std
+  #   du, d2u             = compute_fourier_derivative(out_ori)
+  #   declude             = 1
+  #   loss_pde            = l(-d2u[:, 0, declude:-declude], input_batch[:, 1, declude:-declude])
+
+  #   loss                = loss_data + loss_pde
+
+  #   grad_tuple = torch.autograd.grad(loss, self.model.parameters(), create_graph=True)
+
+        
+  #   self.params = [param for param in self.model.parameters() if param.requires_grad]
+  #   self.gradsH = [gradient if gradient is not None else 0.0 for gradient in grad_tuple]
 
   """
   Function for performing spectral density computation. 

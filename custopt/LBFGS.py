@@ -328,7 +328,7 @@ class LBFGS(Optimizer):
 
         # multiply by initial Hessian 
         # r/d is the final direction
-        if self.H0 is None:
+        if not self.H0 == "Nys":
             r = torch.mul(q, H_diag)
         else:
             # lambd_r     = self.S[self.nys_rank - 1]
