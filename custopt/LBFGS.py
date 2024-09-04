@@ -289,7 +289,7 @@ class LBFGS(Optimizer):
         
         return
 
-    def two_loop_recursion(self, vec, H0 = None):
+    def two_loop_recursion(self, vec):
         """
         Performs two-loop recursion on given vector to obtain Hv.
 
@@ -328,12 +328,10 @@ class LBFGS(Optimizer):
 
         # multiply by initial Hessian 
         # r/d is the final direction
-        if not self.H0 == "Nys":
+        if not state.get("H0") == "Nys":
             r = torch.mul(q, H_diag)
         else:
-            # lambd_r     = self.S[self.nys_rank - 1]
-            # S_mu_inv    = (self.S + self.nys_mu) ** (-1)
-            r = _apply_nys_inv(self.U, self.S, self.nys_mu, q)
+            r = _apply_nys_inv(q, state.get("U"), state.get("S"), state.get("nys_mu"))
 
         for i in range(num_old):
             beta = old_stps[i].dot(r) * rho[i]
@@ -1017,13 +1015,14 @@ class FullBatchLBFGS(LBFGS):
              dtype, debug)
         
         # nystrom initialization
-        self.H0             = H0
-        self.nys_chunk_size = 1
-        self.nys_verbose    = True
-        self.U              = None
-        self.S              = None
-        self.nys_mu         = nys_mu
-        self.nys_rank       = nys_rank
+        state = self.state['global_state']
+        state.setdefault('H0', H0)
+        state.setdefault('nys_mu', nys_mu)
+        state.setdefault('nys_rank', nys_rank)
+        state.setdefault('nys_chunk_size', 1)
+        state.setdefault('nys_verbose', True)
+        state.setdefault('U', None)
+        state.setdefault('S', None)
         self._params_list   = list(self._params)
         
         # self.nysopt     = NysOpt(params, rank = nys_rank, mu = nys_mu)
@@ -1132,5 +1131,6 @@ class FullBatchLBFGS(LBFGS):
             grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
             This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
         """
-        self.U, self.S = _update_preconditioner(grad_tuple, self.nys_rank, self._params_list, self.nys_chunk_size, self.nys_verbose)
+        state = self.state['global_state']
+        state["U"], state["S"] = _update_preconditioner(grad_tuple, state["nys_rank"], self._params_list, state["nys_chunk_size"], state["nys_verbose"])
         

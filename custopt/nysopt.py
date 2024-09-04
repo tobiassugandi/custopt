@@ -5,13 +5,13 @@ from functools import reduce
 
 from .line_search import _armijo
 
-def _apply_nys_inv(U, S, mu, x):
+def _apply_nys_inv(x, U, S, mu, pow = -1.0):
     """Applies the inverse of the Nystrom approximation of the Hessian to a vector."""
-    S_mu_inv    = 1.0 / (S + mu)
+    S_mu_inv    = (S + mu) ** pow
 
     z = U.T @ x
     if mu > 1e-6:
-        z = (U @ (S_mu_inv * z)) + (x - U @ z) / mu 
+        z = (U @ (S_mu_inv * z)) + (x - U @ z) * mu ** pow 
     else:
         z = (U @ (S_mu_inv * z))
     return z
