@@ -309,6 +309,9 @@ class LBFGS(Optimizer):
         old_stps = state.get('old_stps')    # change in iterates
         H_diag = state.get('H_diag')
 
+        ssbfgs = state['ssbfgs']
+        inv_tau_list = state.get('inv_tau_list')
+
         # compute the product of the inverse Hessian approximation and the gradient
         num_old = len(old_dirs)
 
@@ -335,7 +338,12 @@ class LBFGS(Optimizer):
 
         for i in range(num_old):
             beta = old_stps[i].dot(r) * rho[i]
-            r.add_(old_dirs[i], alpha = alpha[i] - beta)
+            if ssbfgs:
+                r.add_(old_dirs[i], alpha = alpha[i] / inv_tau_list[i] - beta)
+                r.mul(inv_tau_list[i])
+            else:
+                r.add_(old_dirs[i], alpha = alpha[i] - beta)
+
 
         return r
 
@@ -374,6 +382,9 @@ class LBFGS(Optimizer):
             H_diag = state.get('H_diag')
             prev_flat_grad = state.get('prev_flat_grad')
             Bs = state.get('Bs')
+
+            ssbfgs = state['ssbfgs']
+            inv_tau_list = state.get('inv_tau_list')
     
             # compute y's
             y = flat_grad.sub(prev_flat_grad)
@@ -396,10 +407,14 @@ class LBFGS(Optimizer):
                     # shift history by one (limited-memory)
                     old_dirs.pop(0)
                     old_stps.pop(0)
+                    if ssbfgs:
+                        inv_tau_list.pop(0)
     
                 # store new direction/step
                 old_dirs.append(s)
                 old_stps.append(y)
+                if ssbfgs:
+                    inv_tau_list.append( 1.0 / min(1.0, - ys / sBs) )
     
                 # update scale of initial Hessian approximation
                 # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
@@ -1010,7 +1025,7 @@ class FullBatchLBFGS(LBFGS):
     """
 
     def __init__(self, params, lr=1, history_size=10, line_search='Wolfe', 
-                 dtype=torch.float, debug=False, H0 = None, nys_mu = 1e-2, nys_rank=10):
+                 dtype=torch.float, debug=False, H0 = None, nys_mu = 1e-2, nys_rank=10, ssbfgs = False):
         super(FullBatchLBFGS, self).__init__(params, lr, history_size, line_search, 
              dtype, debug)
         
@@ -1024,6 +1039,9 @@ class FullBatchLBFGS(LBFGS):
         state.setdefault('U', None)
         state.setdefault('S', None)
         self._params_list   = list(self._params)
+
+        state.setdefault('ssbfgs', ssbfgs)
+        state['inv_tau_list'] = [] # self-scaling
         
         # self.nysopt     = NysOpt(params, rank = nys_rank, mu = nys_mu)
 
