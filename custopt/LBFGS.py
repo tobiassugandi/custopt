@@ -234,8 +234,8 @@ class LBFGS(Optimizer):
         state.setdefault('H_diag',1)
         state.setdefault('fail', True)
 
-        state['old_dirs']   = []
         state['old_stps']   = []
+        state['old_dirs']   = []
         state['rho']        = []
 
     def _numel(self):
@@ -313,8 +313,8 @@ class LBFGS(Optimizer):
 
         state = self.state['global_state']
 
-        old_dirs = state.get('old_dirs')    # change in gradients
         old_stps = state.get('old_stps')    # change in iterates
+        old_dirs = state.get('old_dirs')    # change in gradients
         rho      = state.get('rho')
 
         H_diag = state.get('H_diag')
@@ -322,7 +322,7 @@ class LBFGS(Optimizer):
         ssbfgs = state['ssbfgs']
         inv_tau_list = state.get('inv_tau_list')
 
-        num_old = len(old_dirs)
+        num_old = len(old_stps)
 
         # if 'rho' not in state:
         #     state['rho'] = [None] * history_size
@@ -331,12 +331,12 @@ class LBFGS(Optimizer):
         alpha = [None] * history_size
 
         # for i in range(num_old):
-        #     rho[i] = 1. / old_stps[i].dot(old_dirs[i])
+        #     rho[i] = 1. / old_dirs[i].dot(old_stps[i])
 
         q = vec
         for i in range(num_old - 1, -1, -1):
-            alpha[i] = old_dirs[i].dot(q) * rho[i]
-            q.add_(old_stps[i], alpha = -alpha[i])
+            alpha[i] = old_stps[i].dot(q) * rho[i]
+            q.add_(old_dirs[i], alpha = -alpha[i])
 
         # multiply by initial Hessian 
         # r/d is the final direction
@@ -346,12 +346,12 @@ class LBFGS(Optimizer):
             r = _apply_nys_inv(q, state.get("U"), state.get("S"), state.get("nys_mu"))
 
         for i in range(num_old):
-            beta = old_stps[i].dot(r) * rho[i]
+            beta = old_dirs[i].dot(r) * rho[i]
             if ssbfgs:
-                r.add_(old_dirs[i], alpha = alpha[i] / inv_tau_list[i] - beta)
+                r.add_(old_stps[i], alpha = alpha[i] / inv_tau_list[i] - beta)
                 r.mul(inv_tau_list[i])
             else:
-                r.add_(old_dirs[i], alpha = alpha[i] - beta)
+                r.add_(old_stps[i], alpha = alpha[i] - beta)
 
 
         return r
@@ -388,8 +388,8 @@ class LBFGS(Optimizer):
             d = state.get('d')
             t = state.get('t')
 
-            old_dirs    = state.get('old_dirs')
             old_stps    = state.get('old_stps')
+            old_dirs    = state.get('old_dirs')
             rho         = state.get('rho')
 
             H_diag = state.get('H_diag')
@@ -416,18 +416,18 @@ class LBFGS(Optimizer):
                     y = theta * y + (1 - theta) * Bs
     
                 # updating memory
-                if len(old_dirs) == history_size:
+                if len(old_stps) == history_size:
                     # shift history by one (limited-memory)
-                    old_dirs.pop(0)
                     old_stps.pop(0)
+                    old_dirs.pop(0)
                     rho.pop(0)
 
                     if ssbfgs:
                         inv_tau_list.pop(0)
     
                 # store new direction/step
-                old_dirs.append(s)
-                old_stps.append(y)
+                old_stps.append(s)
+                old_dirs.append(y)
                 rho.append(1.0 / ys)
                 
                 if ssbfgs:
@@ -438,8 +438,8 @@ class LBFGS(Optimizer):
                 # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
                 H_diag = ys / y.dot(y)  # (y*y) 
                 
-                # state['old_dirs'] = old_dirs # todo: not necessary
-                # state['old_stps'] = old_stps #
+                # state['old_stps'] = old_stps # todo: not necessary
+                # state['old_dirs'] = old_dirs #
                 state['H_diag'] = H_diag # todo: however this is necessary since we replaced the variable
 
             else: # doesn't satisfy Powell criteria (a proxy for sufficient progress), e.g. when using Armijo.
