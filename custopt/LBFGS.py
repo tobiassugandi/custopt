@@ -23,7 +23,7 @@ def is_legal(v):
 
     return legal
 
-
+@torch.no_grad()
 def polyinterp(points, x_min_bound=None, x_max_bound=None, plot=False):
     """
     Gives the minimizer and minimum of the interpolating polynomial over given points
@@ -255,6 +255,7 @@ class LBFGS(Optimizer):
             views.append(view)
         return torch.cat(views, 0)
 
+    @torch.no_grad()
     def _add_update(self, step_size, update):
         offset = 0
         for p in self._params:
@@ -455,7 +456,7 @@ class LBFGS(Optimizer):
 
         return
 
-    @torch.no_grad()
+    
     def _step(self, p_k, g_Ok, g_Sk=None, options=None):
         """
         Performs a single optimization step.
@@ -1061,9 +1062,7 @@ class FullBatchLBFGS(LBFGS):
         state.setdefault('ssbfgs', ssbfgs)
         state['inv_tau_list'] = [] # self-scaling
         
-        # self.nysopt     = NysOpt(params, rank = nys_rank, mu = nys_mu)
 
-    @torch.no_grad()
     def step(self, options=None):
         """
         Performs a single optimization step.
