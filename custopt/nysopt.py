@@ -41,26 +41,26 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
                         for gradient in grad_tuple if gradient is not None])
     # print(f'gradsH dtype: {gradsH.dtype}')
 
-    # Generate test matrix (NOTE: This is transposed test matrix)
+    # Generate test matrix (NOTE: This is transposed test matrix --> vmap on dim=0)
     p = gradsH.shape[0]
-    Phi = torch.randn(
+    Ome_T = torch.randn(
         (rank, p), device=gradsH.device, dtype=gradsH.dtype) / (p ** 0.5)
-    Phi = torch.linalg.qr(Phi.t(), mode='reduced')[0].t()
+    Ome_T = torch.linalg.qr(Ome_T.t(), mode='reduced')[0].t() # (Q,R)[0] takes Q: the basis, Ome_T.shape: [rank, p]
 
-    Y = _hvp_vmap(gradsH, _params_list, chunk_size)(Phi)
+    Y_T = _hvp_vmap(gradsH, _params_list, chunk_size)(Ome_T) # Y_T.shape: [rank, p]
 
     with torch.no_grad():
         # Calculate shift
-        shift = torch.finfo(Y.dtype).eps
-        Y_shifted = Y + shift * Phi
+        shift = torch.finfo(Y_T.dtype).eps
+        Y_T_shifted = Y_T + shift * Ome_T # Y_T_shifted.shape: [rank, p]
 
-        # Calculate Phi^T * H * Phi (w/ shift) for Cholesky
-        choleskytarget = torch.mm(Y_shifted, Phi.t())
+        # Calculate Ome_T^T * H * Ome_T (w/ shift) for Cholesky
+        choleskytarget = torch.mm(Y_T_shifted, Ome_T.t()) # choleskytarget.shape = [rank, rank]
 
         # Perform Cholesky, if fails, do eigendecomposition
         # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
         try:
-            C = torch.linalg.cholesky(choleskytarget)
+            L = torch.linalg.cholesky(choleskytarget) # lower triangular matrix, L.shape = [rank, rank]
             success = True
         except:
             # eigendecomposition, eigenvalues and eigenvector matrix
@@ -80,7 +80,7 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
                     # print(f'eigs, shift dtype: {eigs.dtype}, {shift.dtype}')
                     
                     # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
-                    C = torch.linalg.cholesky(
+                    L = torch.linalg.cholesky(
                         torch.mm(eigvectors, torch.mm(torch.diag(eigs.to(eigvectors.dtype)), eigvectors.T)))
 
                     success = True 
@@ -91,31 +91,31 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
         
         if not success:
             print("---Cholesky failed---")
-            B = torch.mm(Y_shifted.t(), 
+            B = torch.mm(Y_T_shifted.t(), 
                             torch.mm(eigvectors, torch.mm(torch.diag((eigs ** (-0.5)).to(eigvectors.dtype)), eigvectors.T))
-                            ).t()
+                            ).t() # B = L^-1 Y_T =  V * S^(-0.5) * V^T * Y_T_shifted
 
         else:
             try:
                 B = torch.linalg.solve_triangular(
-                    C, Y_shifted, upper=False, left=True)
+                    L, Y_T_shifted, upper=False, left=True) # B.shape = [rank, p]
             except:
                 # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
-                B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
-                    'cpu'), upper=False, left=True).to(C.device)
+                B = torch.linalg.solve_triangular(L.to('cpu'), Y_T_shifted.to(
+                    'cpu'), upper=False, left=True).to(L.device)
 
 
         # B = V * S * U^T b/c we have been using transposed sketch
-        _, S, UT = torch.linalg.svd(B, full_matrices=False)
-        U = UT.t()
+        _, S, UT = torch.linalg.svd(B, full_matrices=False) # V.shape = [rank, rank], S.shape = [rank], UT.shape = [rank, p]
+        # U = UT.t()
         S = torch.max(torch.square(S) - shift, torch.tensor(0.0))
+        # rho = S[-1] # smallest eigenvalue of the approximated Hessian
 
-        rho = S[-1] # smallest eigenvalue of the approximated Hessian
 
         if verbose:
             print(f'Approximate eigenvalues = {S}')
 
-    return U, S
+    return UT.t(), S
 
 
 def _hvp_vmap(grad_params, params, chunk_size):
@@ -210,93 +210,7 @@ class NysOpt(Optimizer):
             This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
         """
         self.U, self.S = _update_preconditioner(grad_tuple, self.rank, self._params_list, self.chunk_size, self.verbose)
-        
-    #     # Flatten and concatenate the gradients
-    #     gradsH = torch.cat([gradient.reshape(-1)
-    #                        for gradient in grad_tuple if gradient is not None])
-    #     # print(f'gradsH dtype: {gradsH.dtype}')
 
-    #     # Generate test matrix (NOTE: This is transposed test matrix)
-    #     p = gradsH.shape[0]
-    #     Phi = torch.randn(
-    #         (self.rank, p), device=gradsH.device, dtype=gradsH.dtype) / (p ** 0.5)
-    #     Phi = torch.linalg.qr(Phi.t(), mode='reduced')[0].t()
-
-    #     Y = self._hvp_vmap(gradsH, self._params_list)(Phi)
-
-    #     # Calculate shift
-    #     shift = torch.finfo(Y.dtype).eps
-    #     Y_shifted = Y + shift * Phi
-
-    #     # Calculate Phi^T * H * Phi (w/ shift) for Cholesky
-    #     choleskytarget = torch.mm(Y_shifted, Phi.t())
-
-    #     # Perform Cholesky, if fails, do eigendecomposition
-    #     # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
-    #     try:
-    #         C = torch.linalg.cholesky(choleskytarget)
-    #         success = True
-    #     except:
-    #         # eigendecomposition, eigenvalues and eigenvector matrix
-    #         eigs, eigvectors = torch.linalg.eigh(choleskytarget)
-    #         # print(f'eigs, eigvectors dtype: {eigs.dtype}, {eigvectors.dtype}')
-            
-    #         attempt = 0
-    #         max_attempt = 1
-    #         success = False 
-    #         initial_shift = shift 
-
-    #         while not success and attempt < max_attempt:
-    #             try:
-    #                 shift = initial_shift + (2 ** attempt) * torch.abs(torch.min(eigs))
-    #                 # add shift to eigenvalues
-    #                 eigs = eigs + shift
-    #                 # print(f'eigs, shift dtype: {eigs.dtype}, {shift.dtype}')
-                    
-    #                 # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
-    #                 C = torch.linalg.cholesky(
-    #                     torch.mm(eigvectors, torch.mm(torch.diag(eigs.to(eigvectors.dtype)), eigvectors.T)))
-
-    #                 success = True 
-
-    #             except:
-    #                 attempt += 1
-    #                 # raise RuntimeError("Cholesky decomposition failed after maximum attempts with adjustments.")
-        
-    #     if not success:
-    #         print("---Cholesky failed---")
-    #         B = torch.mm(Y_shifted.t(), 
-    #                      torch.mm(eigvectors, torch.mm(torch.diag((eigs ** (-0.5)).to(eigvectors.dtype)), eigvectors.T))
-    #                      ).t()
-
-    #     else:
-    #         try:
-    #             B = torch.linalg.solve_triangular(
-    #                 C, Y_shifted, upper=False, left=True)
-    #         except:
-    #             # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
-    #             B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
-    #                 'cpu'), upper=False, left=True).to(C.device)
-
-
-    #     # B = V * S * U^T b/c we have been using transposed sketch
-    #     _, S, UT = torch.linalg.svd(B, full_matrices=False)
-    #     self.U = UT.t()
-    #     self.S = torch.max(torch.square(S) - shift, torch.tensor(0.0))
-
-    #     self.rho = self.S[-1]
-
-    #     if self.verbose:
-    #         print(f'Approximate eigenvalues = {self.S}')
-
-    # def _hvp_vmap(self, grad_params, params):
-    #     return vmap(lambda v: self._hvp(grad_params, params, v), in_dims=0, chunk_size=self.chunk_size)
-
-    # def _hvp(self, grad_params, params, v):
-    #     Hv = torch.autograd.grad(grad_params, params, grad_outputs=v.to(grad_params.dtype),
-    #                              retain_graph=True)
-    #     Hv = tuple(Hvi.detach() for Hvi in Hv)
-    #     return torch.cat([Hvi.reshape(-1) for Hvi in Hv])
 
     def _numel(self):
         if self._numel_cache is None:
