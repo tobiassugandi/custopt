@@ -1,3 +1,12 @@
+"""
+A collection of classes and helper functions for optimizers that utilize Nyström approximation.
+
+This implementation is adapted from the code of the following paper:
+    `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+    (https://github.com/pratikrathore8/opt_for_pinns)
+"""
+
 import torch
 from torch.optim import Optimizer
 from torch.func import vmap
@@ -5,10 +14,13 @@ from functools import reduce
 
 from .line_search import _armijo
 
-def _apply_nys_inv(x, U, S, mu, pow = -1.0):
-    """Applies the inverse of the Nystrom approximation of the Hessian to a vector."""
-    S_mu_inv    = (S + mu) ** pow
 
+@torch.no_grad()
+def _apply_nys_inv(x, U, S, mu, pow = -1.0):
+    """Applies the inverse of the Nystrom approximation of the (regularized) Hessian to a vector."""
+    S_mu_inv    = (S + mu) ** pow # eigenvalue inverse
+
+    # U (S + mu)^pow U^T x + (I - U * U^T ) x * mu^pow
     z = U.T @ x
     if mu > 1e-6:
         z = (U @ (S_mu_inv * z)) + (x - U @ z) * mu ** pow 
@@ -37,70 +49,71 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
 
     Y = _hvp_vmap(gradsH, _params_list, chunk_size)(Phi)
 
-    # Calculate shift
-    shift = torch.finfo(Y.dtype).eps
-    Y_shifted = Y + shift * Phi
+    with torch.no_grad():
+        # Calculate shift
+        shift = torch.finfo(Y.dtype).eps
+        Y_shifted = Y + shift * Phi
 
-    # Calculate Phi^T * H * Phi (w/ shift) for Cholesky
-    choleskytarget = torch.mm(Y_shifted, Phi.t())
+        # Calculate Phi^T * H * Phi (w/ shift) for Cholesky
+        choleskytarget = torch.mm(Y_shifted, Phi.t())
 
-    # Perform Cholesky, if fails, do eigendecomposition
-    # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
-    try:
-        C = torch.linalg.cholesky(choleskytarget)
-        success = True
-    except:
-        # eigendecomposition, eigenvalues and eigenvector matrix
-        eigs, eigvectors = torch.linalg.eigh(choleskytarget)
-        # print(f'eigs, eigvectors dtype: {eigs.dtype}, {eigvectors.dtype}')
-        
-        attempt = 0
-        max_attempt = 1
-        success = False 
-        initial_shift = shift 
-
-        while not success and attempt < max_attempt:
-            try:
-                shift = initial_shift + (2 ** attempt) * torch.abs(torch.min(eigs))
-                # add shift to eigenvalues
-                eigs = eigs + shift
-                # print(f'eigs, shift dtype: {eigs.dtype}, {shift.dtype}')
-                
-                # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
-                C = torch.linalg.cholesky(
-                    torch.mm(eigvectors, torch.mm(torch.diag(eigs.to(eigvectors.dtype)), eigvectors.T)))
-
-                success = True 
-
-            except:
-                attempt += 1
-                # raise RuntimeError("Cholesky decomposition failed after maximum attempts with adjustments.")
-    
-    if not success:
-        print("---Cholesky failed---")
-        B = torch.mm(Y_shifted.t(), 
-                        torch.mm(eigvectors, torch.mm(torch.diag((eigs ** (-0.5)).to(eigvectors.dtype)), eigvectors.T))
-                        ).t()
-
-    else:
+        # Perform Cholesky, if fails, do eigendecomposition
+        # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
         try:
-            B = torch.linalg.solve_triangular(
-                C, Y_shifted, upper=False, left=True)
+            C = torch.linalg.cholesky(choleskytarget)
+            success = True
         except:
-            # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
-            B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
-                'cpu'), upper=False, left=True).to(C.device)
+            # eigendecomposition, eigenvalues and eigenvector matrix
+            eigs, eigvectors = torch.linalg.eigh(choleskytarget)
+            # print(f'eigs, eigvectors dtype: {eigs.dtype}, {eigvectors.dtype}')
+            
+            attempt = 0
+            max_attempt = 1
+            success = False 
+            initial_shift = shift 
+
+            while not success and attempt < max_attempt:
+                try:
+                    shift = initial_shift + (2 ** attempt) * torch.abs(torch.min(eigs))
+                    # add shift to eigenvalues
+                    eigs = eigs + shift
+                    # print(f'eigs, shift dtype: {eigs.dtype}, {shift.dtype}')
+                    
+                    # put back the matrix for Cholesky by eigenvector * eigenvalues after shift * eigenvector^T
+                    C = torch.linalg.cholesky(
+                        torch.mm(eigvectors, torch.mm(torch.diag(eigs.to(eigvectors.dtype)), eigvectors.T)))
+
+                    success = True 
+
+                except:
+                    attempt += 1
+                    # raise RuntimeError("Cholesky decomposition failed after maximum attempts with adjustments.")
+        
+        if not success:
+            print("---Cholesky failed---")
+            B = torch.mm(Y_shifted.t(), 
+                            torch.mm(eigvectors, torch.mm(torch.diag((eigs ** (-0.5)).to(eigvectors.dtype)), eigvectors.T))
+                            ).t()
+
+        else:
+            try:
+                B = torch.linalg.solve_triangular(
+                    C, Y_shifted, upper=False, left=True)
+            except:
+                # temporary fix for issue @ https://github.com/pytorch/pytorch/issues/97211
+                B = torch.linalg.solve_triangular(C.to('cpu'), Y_shifted.to(
+                    'cpu'), upper=False, left=True).to(C.device)
 
 
-    # B = V * S * U^T b/c we have been using transposed sketch
-    _, S, UT = torch.linalg.svd(B, full_matrices=False)
-    U = UT.t()
-    S = torch.max(torch.square(S) - shift, torch.tensor(0.0))
+        # B = V * S * U^T b/c we have been using transposed sketch
+        _, S, UT = torch.linalg.svd(B, full_matrices=False)
+        U = UT.t()
+        S = torch.max(torch.square(S) - shift, torch.tensor(0.0))
 
-    rho = S[-1] # smallest eigenvalue of the approximated Hessian
+        rho = S[-1] # smallest eigenvalue of the approximated Hessian
 
-    if verbose:
-        print(f'Approximate eigenvalues = {S}')
+        if verbose:
+            print(f'Approximate eigenvalues = {S}')
 
     return U, S
 
@@ -117,22 +130,22 @@ def _hvp(grad_params, params, v):
 
 
 
-
-
 class NysOpt(Optimizer):
-    """Base Class of optimizers that use Nyström preconditioning.
-    
-    `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
-    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+    """Base Class of optimizers that use Nyström approximation.
 
+    This implementation is based on the code of the following paper:
+        `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+        Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+
+        NOTE: This optimizer is currently a beta version. 
+
+        Our implementation is inspired by the PyTorch implementation of `L-BFGS 
+        <https://pytorch.org/docs/stable/_modules/torch/optim/lbfgs.html#LBFGS>`.
+
+    
     .. warning::
         This optimizer doesn't support per-parameter options and parameter
         groups (there can be only one).
-
-    NOTE: This optimizer is currently a beta version. 
-
-    Our implementation is inspired by the PyTorch implementation of `L-BFGS 
-    <https://pytorch.org/docs/stable/_modules/torch/optim/lbfgs.html#LBFGS>`.
     
     The parameters rank and mu will probably need to be tuned for your specific problem.
     If the optimizer is running very slowly, you can try one of the following:
@@ -313,6 +326,11 @@ class NysOpt(Optimizer):
 
 class SketchySGD(NysOpt):
     """Implements SketchySGD. We assume that there is only one parameter group to optimize.
+
+    This implementation is based on the code of the following paper:
+        `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+        Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups

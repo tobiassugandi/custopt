@@ -1,5 +1,8 @@
 '''
-Adapted from the implementation of Rathore et al. (2024) (https://github.com/pratikrathore8/opt_for_pinns), 
+This implementation is adapted from the code of the following paper:
+    `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+    (https://github.com/pratikrathore8/opt_for_pinns)
 which in turn is adapted from:
   Original paper: PyHessian: Neural Networks Through the Lens of the Hessian (https://arxiv.org/abs/1912.07145)
   Original authors implementation: https://github.com/amirgholami/PyHessian

@@ -1,3 +1,7 @@
+'''
+Adapted from HJMShi github repo: https://github.com/hjmshi/PyTorch-LBFGS
+'''
+
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -230,8 +234,9 @@ class LBFGS(Optimizer):
         state.setdefault('H_diag',1)
         state.setdefault('fail', True)
 
-        state['old_dirs'] = []
-        state['old_stps'] = []
+        state['old_dirs']   = []
+        state['old_stps']   = []
+        state['rho']        = []
 
     def _numel(self):
         if self._numel_cache is None:
@@ -289,12 +294,13 @@ class LBFGS(Optimizer):
         
         return
 
+    @torch.no_grad()
     def two_loop_recursion(self, vec):
         """
         Performs two-loop recursion on given vector to obtain Hv.
 
         Inputs:
-            vec (tensor): 1-D tensor to apply two-loop recursion to
+            vec (tensor): negative gradient to apply two-loop recursion to (1-D tensor) 
 
         Output:
             r (tensor): matrix-vector product Hv
@@ -305,24 +311,26 @@ class LBFGS(Optimizer):
         history_size = group['history_size']
 
         state = self.state['global_state']
+
         old_dirs = state.get('old_dirs')    # change in gradients
         old_stps = state.get('old_stps')    # change in iterates
+        rho      = state.get('rho')
+
         H_diag = state.get('H_diag')
 
         ssbfgs = state['ssbfgs']
         inv_tau_list = state.get('inv_tau_list')
 
-        # compute the product of the inverse Hessian approximation and the gradient
         num_old = len(old_dirs)
 
-        if 'rho' not in state:
-            state['rho'] = [None] * history_size
-            state['alpha'] = [None] * history_size
-        rho = state['rho']
-        alpha = state['alpha']
+        # if 'rho' not in state:
+        #     state['rho'] = [None] * history_size
+        #     state['alpha'] = [None] * history_size
+        # rho = state['rho']
+        alpha = [None] * history_size
 
-        for i in range(num_old):
-            rho[i] = 1. / old_stps[i].dot(old_dirs[i])
+        # for i in range(num_old):
+        #     rho[i] = 1. / old_stps[i].dot(old_dirs[i])
 
         q = vec
         for i in range(num_old - 1, -1, -1):
@@ -347,6 +355,7 @@ class LBFGS(Optimizer):
 
         return r
 
+    @torch.no_grad()
     def curvature_update(self, flat_grad, eps=1e-2, damping=False):
         """
         Performs curvature update.
@@ -377,8 +386,11 @@ class LBFGS(Optimizer):
             
             d = state.get('d')
             t = state.get('t')
-            old_dirs = state.get('old_dirs')
-            old_stps = state.get('old_stps')
+
+            old_dirs    = state.get('old_dirs')
+            old_stps    = state.get('old_stps')
+            rho         = state.get('rho')
+
             H_diag = state.get('H_diag')
             prev_flat_grad = state.get('prev_flat_grad')
             Bs = state.get('Bs')
@@ -407,12 +419,16 @@ class LBFGS(Optimizer):
                     # shift history by one (limited-memory)
                     old_dirs.pop(0)
                     old_stps.pop(0)
+                    rho.pop(0)
+
                     if ssbfgs:
                         inv_tau_list.pop(0)
     
                 # store new direction/step
                 old_dirs.append(s)
                 old_stps.append(y)
+                rho.append(1.0 / ys)
+                
                 if ssbfgs:
                     inv_tau_list.append( 1.0 / min(1.0, ys / sBs) )
                     print(f"inv_tau: {inv_tau_list[-1]}")
@@ -421,9 +437,9 @@ class LBFGS(Optimizer):
                 # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
                 H_diag = ys / y.dot(y)  # (y*y) 
                 
-                state['old_dirs'] = old_dirs
-                state['old_stps'] = old_stps
-                state['H_diag'] = H_diag
+                # state['old_dirs'] = old_dirs # todo: not necessary
+                # state['old_stps'] = old_stps #
+                state['H_diag'] = H_diag # todo: however this is necessary since we replaced the variable
 
             else: # doesn't satisfy Powell criteria (a proxy for sufficient progress), e.g. when using Armijo.
                 # save skip
@@ -439,6 +455,7 @@ class LBFGS(Optimizer):
 
         return
 
+    @torch.no_grad()
     def _step(self, p_k, g_Ok, g_Sk=None, options=None):
         """
         Performs a single optimization step.
@@ -1046,6 +1063,7 @@ class FullBatchLBFGS(LBFGS):
         
         # self.nysopt     = NysOpt(params, rank = nys_rank, mu = nys_mu)
 
+    @torch.no_grad()
     def step(self, options=None):
         """
         Performs a single optimization step.
