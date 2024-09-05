@@ -414,7 +414,8 @@ class LBFGS(Optimizer):
                 old_dirs.append(s)
                 old_stps.append(y)
                 if ssbfgs:
-                    inv_tau_list.append( 1.0 / min(1.0, - ys / sBs) )
+                    inv_tau_list.append( 1.0 / min(1.0, ys / sBs) )
+                    print(f"inv_tau: {inv_tau_list[-1]}")
     
                 # update scale of initial Hessian approximation
                 # todo: when nystrom is used.. if self.H0 is None: otherwise set 0
