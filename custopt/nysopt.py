@@ -28,6 +28,49 @@ def _apply_nys_inv(x, U, S, mu, pow = -1.0):
         z = (U @ (S_mu_inv * z))
     return z
 
+@torch.no_grad()
+def _apply_nys_precond_inv(U, S_mu_inv, mu, lambd_r, x):
+    """Applies the inverse of the Nystrom preconditioner of the Hessian to a vector."""
+    z = U.T @ x
+    z = (lambd_r + mu) * (U @ (S_mu_inv * z)) + (x - U @ z)
+    return z
+
+def _nystrom_pcg(hess, b, x, mu, U, S, r, tol, max_iters):
+    """Solves a positive-definite linear system using NyströmPCG.
+
+    `Frangella et al. Randomized Nyström Preconditioning. 
+    SIAM Journal on Matrix Analysis and Applications, 2023.
+    <https://epubs.siam.org/doi/10.1137/21M1466244>`"""
+    lambd_r = S[r - 1]
+    S_mu_inv = (S + mu) ** (-1)
+
+    resid = b - (hess(x) + mu * x)
+    with torch.no_grad():
+        z = _apply_nys_precond_inv(U, S_mu_inv, mu, lambd_r, resid)
+        p = z.clone()
+
+    i = 0
+
+    while torch.norm(resid) > tol and i < max_iters:
+        v = hess(p) + mu * p
+        with torch.no_grad():
+            alpha = torch.vdot(resid, z) / torch.vdot(p, v)
+            x += alpha * p
+
+            rTz = torch.vdot(resid, z)
+            resid -= alpha * v
+            z = _apply_nys_precond_inv(U, S_mu_inv, mu, lambd_r, resid)
+            beta = torch.vdot(resid, z) / rTz
+
+            p = z + beta * p
+
+        i += 1
+
+    if torch.norm(resid) > tol:
+        print(f"Warning: PCG did not converge to tolerance. Tolerance was {tol} but norm of residual is {torch.norm(resid)}")
+
+    return x
+
 def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
     """Update the Nystrom approximation of the Hessian.
 
@@ -336,3 +379,119 @@ class SketchySGD(NysOpt):
         self.n_iters += 1
 
         return loss
+
+
+
+class NysNewtonCG(NysOpt):
+    """Implementation of NysNewtonCG, a damped Newton-CG method that uses Nyström preconditioning.
+    
+    `Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+
+    .. warning::
+        This optimizer doesn't support per-parameter options and parameter
+        groups (there can be only one).
+
+    NOTE: This optimizer is currently a beta version. 
+
+    Our implementation is inspired by the PyTorch implementation of `L-BFGS 
+    <https://pytorch.org/docs/stable/_modules/torch/optim/lbfgs.html#LBFGS>`.
+    
+    The parameters rank and mu will probably need to be tuned for your specific problem.
+    If the optimizer is running very slowly, you can try one of the following:
+    - Increase the rank (this should increase the accuracy of the Nyström approximation in PCG)
+    - Reduce cg_tol (this will allow PCG to terminate with a less accurate solution)
+    - Reduce cg_max_iters (this will allow PCG to terminate after fewer iterations)
+
+    Args:
+        params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups
+        lr (float, optional): learning rate (default: 1.0)
+        rank (int, optional): rank of the Nyström approximation (default: 10)
+        mu (float, optional): damping parameter (default: 1e-4)
+        chunk_size (int, optional): number of Hessian-vector products to be computed in parallel (default: 1)
+        cg_tol (float, optional): tolerance for PCG (default: 1e-16)
+        cg_max_iters (int, optional): maximum number of PCG iterations (default: 1000)
+        line_search_fn (str, optional): either 'armijo' or None (default: None)
+        verbose (bool, optional): verbosity (default: False)
+    
+    """
+
+    def __init__(self, params, lr=1.0, rank=10, mu=1e-4, chunk_size=1,
+                 cg_tol=1e-16, cg_max_iters=1000, line_search_fn=None, verbose=False, 
+                 precond_update_freq = 1):
+        defaults = dict(lr=lr, rank=rank, chunk_size=chunk_size, mu=mu, cg_tol=cg_tol,
+                        cg_max_iters=cg_max_iters, line_search_fn=line_search_fn, precond_update_freq= precond_update_freq)
+        
+        super(NysNewtonCG, self).__init__(params, defaults, lr=lr, rank=rank, mu=mu, chunk_size=chunk_size,
+                 line_search_fn=line_search_fn, verbose=verbose)
+
+        self.cg_tol = cg_tol
+        self.cg_max_iters = cg_max_iters
+        self.precond_update_freq = precond_update_freq
+        
+
+    def step(self, closure=None):
+        """Perform a single optimization step.
+
+        Args:
+            closure (callable, optional): A closure that reevaluates the model and returns (i) the loss and (ii) gradient w.r.t. the parameters.
+            The closure can compute the gradient w.r.t. the parameters by calling torch.autograd.grad on the loss with create_graph=True.
+        """
+
+        # NOTE: The closure must return both the loss and the gradient
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss, grad_tuple = closure()
+
+        g = torch.cat([grad.reshape(-1) for grad in grad_tuple if grad is not None])
+        
+        if self.n_iters == 0:
+            # Store the previous direction for warm starting PCG
+            self.old_dir = torch.zeros(
+                self._numel(), device=self._params[0].device, dtype = g.dtype)
+
+        # One step update
+        for group_idx, group in enumerate(self.param_groups):
+            def hvp_temp(x):
+                return _hvp(g, self._params_list, x)
+
+            # Calculate the Newton direction
+            d = _nystrom_pcg(hvp_temp, g, self.old_dir,
+                             self.mu, self.U, self.S, self.rank, self.cg_tol, self.cg_max_iters)
+
+            # Store the previous direction for warm starting PCG
+            self.old_dir = d
+
+            # Check if d is a descent direction
+            if torch.vdot(d, g).real <= 0:
+                print("Warning: d is not a descent direction")
+
+            if self.line_search_fn == 'armijo':
+                x_init = self._clone_param()
+
+                def obj_func(x, t, dx):
+                    self._add_grad(t, dx)
+                    loss = float(closure()[0])
+                    self._set_param(x)
+                    return loss
+
+                # Use -d for convention
+                t = _armijo(obj_func, x_init, g, -d, group['lr'])
+            else:
+                t = group['lr']
+
+            self.state[group_idx]['t'] = t
+
+            # update parameters
+            ls = 0
+            for p in group['params']:
+                np = torch.numel(p)
+                dp = d[ls:ls+np].reshape(p.shape)
+                ls += np
+                p.data.add_(-dp, alpha=t)
+
+        self.n_iters += 1
+
+        return loss, g
