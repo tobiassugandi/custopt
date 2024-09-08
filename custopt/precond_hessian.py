@@ -69,7 +69,7 @@ class Precond_hessian():
     self.tilde_v_vecs = tilde_v_vecs
     self.tilde_s_vecs = tilde_s_vecs
 
-
+    # maybe self.list.reverse() is better
 
 
 
@@ -119,8 +119,7 @@ class Precond_hessian():
     else:
       v1 = _apply_nys_inv((hv_prime - v1), self.U, self.S, self.nys_mu, 
                                pow=-0.5)
-    v2 = torch.tensor([tilde_s.dot(hv_prime) for tilde_s in self.tilde_s_vecs], device=self.device)
-    
+    v2 = torch.tensor([tilde_s.dot(hv_prime) for tilde_s in reversed(self.tilde_s_vecs)], device=self.device)
     return torch.cat([v1, v2], 0)
 
   """
