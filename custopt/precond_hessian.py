@@ -1,5 +1,5 @@
 '''
-Adapted from the implementation of Rathore et al. (2024) (https://github.com/pratikrathore8/opt_for_pinns)
+Modified from the implementation of Rathore et al. (2024) (https://github.com/pratikrathore8/opt_for_pinns)
 '''
 
 import torch
@@ -70,6 +70,11 @@ class Precond_hessian():
     self.tilde_s_vecs = tilde_s_vecs
 
     # maybe self.list.reverse() is better
+    self.tilde_v_vecs.reverse()
+    self.tilde_s_vecs.reverse()
+    self.y_hist.reverse()
+    self.rho_hist.reverse()
+
 
 
 
@@ -119,7 +124,7 @@ class Precond_hessian():
     else:
       v1 = _apply_nys_inv((hv_prime - v1), self.U, self.S, self.nys_mu, 
                                pow=-0.5)
-    v2 = torch.tensor([tilde_s.dot(hv_prime) for tilde_s in reversed(self.tilde_s_vecs)], device=self.device)
+    v2 = torch.tensor([tilde_s.dot(hv_prime) for tilde_s in self.tilde_s_vecs], device=self.device)
     return torch.cat([v1, v2], 0)
 
   """
