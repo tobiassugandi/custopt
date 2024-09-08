@@ -40,10 +40,10 @@ class Precond_hessian():
       rho_hist    = [rho.to(device) for rho in state['rho'] ]
       gamma       = state['H_diag'].to(device)
       
-      self.H0     = state.get("H0")
       self.U      = state.get("U")
       self.S      = state.get("S")
       self.nys_mu = state.get("nys_mu")
+    self.H0     = state.get("H0")
 
     self.history_size   = history_size
     self.y_hist         = y_hist
