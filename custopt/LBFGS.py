@@ -749,6 +749,8 @@ class LBFGS(Optimizer):
             state['Bs'] = Bs
             state['fail'] = fail
 
+            F_new.backward()
+
             return F_new, t, ls_step, closure_eval, desc_dir, fail
 
         # perform weak Wolfe line search
@@ -1146,19 +1148,29 @@ class FullBatchLBFGS(LBFGS):
         else:
             eps = options['eps']
         
+        if 'closure' not in options.keys():
+            raise(ValueError('closure option not specified.'))
+        else:
+            closure = options['closure']
+        if ('current_loss' not in options.keys()) and state['n_iter'] == 0:
+            F_k = closure()
+            # closure_eval += 1
+            F_k.backward()
+
+
         # gather gradient
-        grad = self._gather_flat_grad()
+        grad = self._gather_flat_grad() # this is the new gradient from the line search procedure
         
         # update curvature if after 1st iteration
         state = self.state['global_state']
         if state['n_iter'] > 0:
-            self.curvature_update(grad, eps, damping)
+            self.curvature_update(grad, eps, damping) # here grad is cosidered as the the NEW gradient
 
         # compute search direction
         p = self.two_loop_recursion(-grad)
 
         # take step
-        return self._step(p, grad, options=options)
+        return self._step(p, grad, options=options) # here grad is to be considered as the OLD gradient (prev_flat_grad)
 
     def update_preconditioner(self, grad_tuple):
         """Update the Nystrom approximation of the Hessian.
