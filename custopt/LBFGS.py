@@ -1136,6 +1136,7 @@ class FullBatchLBFGS(LBFGS):
             should try increasing the maximum number of line search steps max_ls.
 
         """
+        state = self.state['global_state']
         
         # load options for damping and eps
         if 'damping' not in options.keys():
@@ -1162,7 +1163,6 @@ class FullBatchLBFGS(LBFGS):
         grad = self._gather_flat_grad() # this is the new gradient from the line search procedure
         
         # update curvature if after 1st iteration
-        state = self.state['global_state']
         if state['n_iter'] > 0:
             self.curvature_update(grad, eps, damping) # here grad is cosidered as the the NEW gradient
 
