@@ -9,7 +9,7 @@ from functools import reduce
 from copy import deepcopy
 from torch.optim import Optimizer
 # from custopt.nys_newton_cg import _apply_nys_precond_inv
-from custopt.nysopt import _update_preconditioner, _apply_nys_inv
+from custopt.nysopt import _nys_hess_approx, _apply_nys_inv, _adaptive_nys_hess_approx
 
 def is_legal(v):
     """
@@ -1046,7 +1046,7 @@ class FullBatchLBFGS(LBFGS):
     """
 
     def __init__(self, params, lr=1, history_size=10, line_search='Wolfe', 
-                 dtype=torch.float, debug=False, H0 = None, nys_mu = 1e-2, nys_rank=10, ssbfgs = False):
+                 dtype=torch.float, debug=False, H0 = None, nys_mu = 1e-2, nys_rank=15, nys_adaptive = True, nys_max_rank=100, ssbfgs = False):
         super(FullBatchLBFGS, self).__init__(params, lr, history_size, line_search, 
              dtype, debug)
         
@@ -1055,6 +1055,8 @@ class FullBatchLBFGS(LBFGS):
         state.setdefault('H0', H0)
         state.setdefault('nys_mu', nys_mu)
         state.setdefault('nys_rank', nys_rank)
+        state.setdefault('nys_adaptive', nys_adaptive)
+        state.setdefault('nys_max_rank', nys_max_rank)
         state.setdefault('nys_chunk_size', 1)
         state.setdefault('nys_verbose', True)
         state.setdefault('U', None)
@@ -1180,5 +1182,5 @@ class FullBatchLBFGS(LBFGS):
             This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
         """
         state = self.state['global_state']
-        state["U"], state["S"] = _update_preconditioner(grad_tuple, state["nys_rank"], self._params_list, state["nys_chunk_size"], state["nys_verbose"])
-        
+        # state["U"], state["S"] = _nys_hess_approx(grad_tuple, state["nys_rank"], self._params_list, state["nys_chunk_size"], state["nys_verbose"])
+        state["U"], state["S"] = _adaptive_nys_hess_approx(grad_tuple, self._params_list, state["nys_chunk_size"], state["nys_verbose"], rank0 = state["nys_rank"], adaptive = state["nys_adaptive"], mu = state["nys_mu"], max_rank = state["nys_max_rank"])

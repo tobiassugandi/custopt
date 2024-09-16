@@ -71,12 +71,48 @@ def _nystrom_pcg(hess, b, x, mu, U, S, r, tol, max_iters):
 
     return x
 
-def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
+def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, rank0 = 15, adaptive = True, mu = 1e-2, max_rank = 100, rank_mult = 2):
+    """Adaptive rank selection for the Nystrom approximation of the Hessian. 
+    The rank doubles until the ratio of the k-th eigenvalue to the matrix regularizer mu is less than 10 (Frangella et al., 23). 
+
+    Args:
+        grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
+            This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
+        adaptive (bool): whether to adaptively select the rank or not
+    """
+    l_k         = 999999.
+    rank        = rank0
+    rank_diff   = int(rank - 0)  # number of new sketch
+    ome_T_prev  = None 
+    Y_T_prev    = None
+    while l_k / mu > 10 and rank < max_rank:
+        U, S, ome_T_prev, Y_T_prev  = _nys_hess_approx(grad_tuple, rank_diff, _params_list, chunk_size, verbose, ome_T_prev, Y_T_prev, adaptive)
+        l_k                         = S[-1]
+        if verbose:
+            print(f'Rank = {rank}, l_k / mu = {l_k / mu}')
+        
+        # next_iter
+        rank_prev                   = rank
+        rank                        = int(rank * rank_mult)         # multiply the rank
+        rank_diff                   = rank - rank_prev              # delta rank = rank, so doubles the rank
+        if rank > max_rank:
+            rank        = rank - rank_diff  # return to initial
+            rank_diff   = max_rank - rank
+            rank        = max_rank
+
+        if not adaptive:
+            break
+
+    return U, S
+
+
+def _nys_hess_approx(grad_tuple, rank, _params_list, chunk_size, verbose, ome_T_prev= None, Y_T_prev = None, adaptive = False):
     """Update the Nystrom approximation of the Hessian.
 
     Args:
         grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
-        This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
+            This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
+        adaptive (bool): whether to output the sketch matrix and the test matrix for adaptive rank selection or not
     """
 
     # Flatten and concatenate the gradients
@@ -86,19 +122,24 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
 
     # Generate test matrix (NOTE: This is transposed test matrix --> vmap on dim=0)
     p = gradsH.shape[0]
-    Ome_T = torch.randn(
+    ome_T = torch.randn(
         (rank, p), device=gradsH.device, dtype=gradsH.dtype) / (p ** 0.5)
-    Ome_T = torch.linalg.qr(Ome_T.t(), mode='reduced')[0].t() # (Q,R)[0] takes Q: the basis, Ome_T.shape: [rank, p]
+    ome_T = torch.linalg.qr(ome_T.t(), mode='reduced')[0].t() # (Q,R)[0] takes Q -- the basis; ome_T.shape: [rank, p] due to t.() twice
 
-    Y_T = _hvp_vmap(gradsH, _params_list, chunk_size)(Ome_T) # Y_T.shape: [rank, p]
+    Y_T = _hvp_vmap(gradsH, _params_list, chunk_size)(ome_T) # Y_T.shape: [rank, p]
+
+    if ome_T_prev is not None and Y_T_prev is not None:
+        assert ome_T_prev.shape[1] == ome_T.shape[1]
+        ome_T   = torch.cat([ome_T_prev, ome_T], dim=0)
+        Y_T     = torch.cat([Y_T_prev, Y_T], dim=0)
 
     with torch.no_grad():
         # Calculate shift
         shift = torch.finfo(Y_T.dtype).eps
-        Y_T_shifted = Y_T + shift * Ome_T # Y_T_shifted.shape: [rank, p]
+        Y_T_shifted = Y_T + shift * ome_T # Y_T_shifted.shape: [rank, p]
 
-        # Calculate Ome_T^T * H * Ome_T (w/ shift) for Cholesky
-        choleskytarget = torch.mm(Y_T_shifted, Ome_T.t()) # choleskytarget.shape = [rank, rank]
+        # Calculate ome_T^T * H * ome_T (w/ shift) for Cholesky
+        choleskytarget = torch.mm(Y_T_shifted, ome_T.t()) # choleskytarget.shape = [rank, rank]
 
         # Perform Cholesky, if fails, do eigendecomposition
         # The new shift is the abs of smallest eigenvalue (negative) plus the original shift
@@ -157,8 +198,11 @@ def _update_preconditioner(grad_tuple, rank, _params_list, chunk_size, verbose):
 
         if verbose:
             print(f'Approximate eigenvalues = {S}')
-
-    return UT.t(), S
+    
+    if not adaptive:
+        return UT.t(), S
+    else:
+        return UT.t(), S, ome_T, Y_T
 
 
 def _hvp_vmap(grad_params, params, chunk_size):
@@ -252,7 +296,7 @@ class NysOpt(Optimizer):
             grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
             This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
         """
-        self.U, self.S = _update_preconditioner(grad_tuple, self.rank, self._params_list, self.chunk_size, self.verbose)
+        self.U, self.S = _nys_hess_approx(grad_tuple, self.rank, self._params_list, self.chunk_size, self.verbose)
 
 
     def _numel(self):
