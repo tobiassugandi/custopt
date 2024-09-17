@@ -80,13 +80,16 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
             This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
         adaptive (bool): whether to adaptively select the rank or not
     """
+    if not adaptive:
+        return _nys_hess_approx(grad_tuple, rank0, _params_list, chunk_size, verbose, adaptive)
+
     l_k         = 999999.
     rank        = rank0
     rank_diff   = int(rank - 0)  # number of new sketch
     ome_T_prev  = None 
     Y_T_prev    = None
     while l_k / mu > 10 and rank < max_rank:
-        U, S, ome_T_prev, Y_T_prev  = _nys_hess_approx(grad_tuple, rank_diff, _params_list, chunk_size, verbose, ome_T_prev, Y_T_prev, adaptive)
+        U, S, ome_T_prev, Y_T_prev  = _nys_hess_approx(grad_tuple, rank_diff, _params_list, chunk_size, verbose, adaptive, ome_T_prev, Y_T_prev)
         l_k                         = S[-1]
         if verbose:
             print(f'Rank = {rank}, l_k / mu = {l_k / mu}')
@@ -100,13 +103,11 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
             rank_diff   = max_rank - rank
             rank        = max_rank
 
-        if not adaptive:
-            break
 
     return U, S
 
 
-def _nys_hess_approx(grad_tuple, rank, _params_list, chunk_size, verbose, ome_T_prev= None, Y_T_prev = None, adaptive = False):
+def _nys_hess_approx(grad_tuple, rank, _params_list, chunk_size, verbose, adaptive = False, ome_T_prev= None, Y_T_prev = None):
     """Update the Nystrom approximation of the Hessian.
 
     Args:
