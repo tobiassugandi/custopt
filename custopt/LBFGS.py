@@ -750,8 +750,11 @@ class LBFGS(Optimizer):
             state['fail'] = fail
 
             F_new.backward()
+            closure_eval += 1
+            g_new = self._gather_flat_grad()
+            grad_eval = 1
 
-            return F_new, t, ls_step, closure_eval, desc_dir, fail
+            return F_new, g_new, t, ls_step, closure_eval, grad_eval, desc_dir, fail
 
         # perform weak Wolfe line search
         elif line_search == 'Wolfe':
@@ -1173,6 +1176,181 @@ class FullBatchLBFGS(LBFGS):
 
         # take step
         return self._step(p, grad, options=options) # here grad is to be considered as the OLD gradient (prev_flat_grad)
+
+    def update_preconditioner(self, grad_tuple):
+        """Update the Nystrom approximation of the Hessian.
+
+        Args:
+            grad_tuple (tuple): tuple of Tensors containing the gradients of the loss w.r.t. the parameters. 
+            This tuple can be obtained by calling torch.autograd.grad on the loss with create_graph=True.
+        """
+        state = self.state['global_state']
+        # state["U"], state["S"] = _nys_hess_approx(grad_tuple, state["nys_rank"], self._params_list, state["nys_chunk_size"], state["nys_verbose"])
+        state["U"], state["S"] = _adaptive_nys_hess_approx(grad_tuple, self._params_list, state["nys_chunk_size"], state["nys_verbose"], rank0 = state["nys_rank"], adaptive = state["nys_adaptive"], mu = state["nys_mu"], max_rank = state["nys_max_rank"])
+
+
+
+class FullOverlapLBFGS(LBFGS):
+    """
+    Implements full-overlap L-BFGS algorithm. 
+    Can be used with mini-batches. 
+    Wraps the LBFGS optimizer. 
+    Calling step() for a mini-batch:
+        1) gO <= forward, backward, get gradient
+        2) d <= the two-loop recursion (g_S = g_O),
+        3) theta_new, g_Onew <= _step
+        4) update the curvature pair
+
+    Adapted the public code by: Hao-Jun Michael Shi and Dheevatsa Mudigere
+
+    Warnings:
+      . Does not support per-parameter options and parameter groups.
+      . All parameters have to be on a single device.
+
+    Inputs:
+        lr (float): steplength or learning rate (default: 1)
+        history_size (int): update history size (default: 10)
+        line_search (str): designates line search to use (default: 'Wolfe')
+            Options:
+                'None': uses steplength designated in algorithm
+                'Armijo': uses Armijo backtracking line search
+                'Wolfe': uses Armijo-Wolfe bracketing line search
+        dtype: data type (default: torch.float)
+        debug (bool): debugging mode
+
+    """
+
+    def __init__(self, params, lr=1, history_size=10, line_search='Wolfe', 
+                 dtype=torch.float, debug=False, 
+                 H0 = None, nys_mu = 1e-2, nys_rank=15, 
+                 nys_adaptive = True, nys_max_rank=100, 
+                 ssbfgs = False):
+        super(FullOverlapLBFGS, self).__init__(params, lr, history_size, line_search, 
+             dtype, debug)
+        
+        # nystrom initialization
+        state = self.state['global_state']
+        state.setdefault('H0', H0)
+        state.setdefault('nys_mu', nys_mu)
+        state.setdefault('nys_rank', nys_rank)
+        state.setdefault('nys_adaptive', nys_adaptive)
+        state.setdefault('nys_max_rank', nys_max_rank)
+        state.setdefault('nys_chunk_size', 1)
+        state.setdefault('nys_verbose', True)
+        state.setdefault('U', None)
+        state.setdefault('S', None)
+        self._params_list   = list(self._params)
+
+        state.setdefault('ssbfgs', ssbfgs)
+        state['inv_tau_list'] = [] # self-scaling
+        
+
+    def step(self, options=None):
+        """
+        Performs a single optimization step.
+
+        Inputs:
+            options (dict): contains options for performing line search (default: None)
+            
+        General Options:
+            'eps' (float): constant for curvature pair rejection or damping (default: 1e-2)
+            'damping' (bool): flag for using Powell damping (default: False)
+
+        Options for Armijo backtracking line search:
+            'closure' (callable): reevaluates model and returns function value
+            'current_loss' (tensor): objective value at current iterate (default: F(x_k))
+            'gtd' (tensor): inner product g_Ok'd in line search (default: g_Ok'd)
+            'eta' (tensor): factor for decreasing steplength > 0 (default: 2)
+            'c1' (tensor): sufficient decrease constant in (0, 1) (default: 1e-4)
+            'max_ls' (int): maximum number of line search steps permitted (default: 10)
+            'interpolate' (bool): flag for using interpolation (default: True)
+            'inplace' (bool): flag for inplace operations (default: True)
+            'ls_debug' (bool): debugging mode for line search
+
+        Options for Wolfe line search:
+            'closure' (callable): reevaluates model and returns function value
+            'current_loss' (tensor): objective value at current iterate (default: F(x_k))
+            'gtd' (tensor): inner product g_Ok'd in line search (default: g_Ok'd)
+            'eta' (float): factor for extrapolation (default: 2)
+            'c1' (float): sufficient decrease constant in (0, 1) (default: 1e-4)
+            'c2' (float): curvature condition constant in (0, 1) (default: 0.9)
+            'max_ls' (int): maximum number of line search steps permitted (default: 10)
+            'interpolate' (bool): flag for using interpolation (default: True)
+            'inplace' (bool): flag for inplace operations (default: True)
+            'ls_debug' (bool): debugging mode for line search
+
+        Outputs (depends on line search):
+          . No line search:
+                t (float): steplength
+          . Armijo backtracking line search:
+                F_new (tensor): loss function at new iterate
+                t (tensor): final steplength
+                ls_step (int): number of backtracks
+                closure_eval (int): number of closure evaluations
+                desc_dir (bool): descent direction flag
+                    True: p_k is descent direction with respect to the line search
+                    function
+                    False: p_k is not a descent direction with respect to the line
+                    search function
+                fail (bool): failure flag
+                    True: line search reached maximum number of iterations, failed
+                    False: line search succeeded
+          . Wolfe line search:
+                F_new (tensor): loss function at new iterate
+                g_new (tensor): gradient at new iterate
+                t (float): final steplength
+                ls_step (int): number of backtracks
+                closure_eval (int): number of closure evaluations
+                grad_eval (int): number of gradient evaluations
+                desc_dir (bool): descent direction flag
+                    True: p_k is descent direction with respect to the line search
+                    function
+                    False: p_k is not a descent direction with respect to the line
+                    search function
+                fail (bool): failure flag
+                    True: line search reached maximum number of iterations, failed
+                    False: line search succeeded
+
+        Notes:
+          . If encountering line search failure in the deterministic setting, one
+            should try increasing the maximum number of line search steps max_ls.
+
+        """
+        state = self.state['global_state']
+        
+        # load options for damping and eps
+        if 'damping' not in options.keys():
+            damping = False
+        else:
+            damping = options['damping']
+            
+        if 'eps' not in options.keys():
+            eps = 1e-2
+        else:
+            eps = options['eps']
+        
+        if 'closure' not in options.keys():
+            raise(ValueError('closure option not specified.'))
+        else:
+            closure = options['closure']
+        
+        # Additional gradient calculation for a new batch (compared to full-batch)
+        F_k = closure()
+        # closure_eval += 1
+        F_k.backward()
+
+        # gather gradient
+        grad = self._gather_flat_grad() # this is the new gradient from the line search procedure
+        
+        # compute search direction
+        p = self.two_loop_recursion(-grad)
+
+        # take step
+        F_new, grad, t, ls_step, closure_eval, grad_eval, desc_dir, fail = self._step(p, grad, options=options) # here grad is to be considered as the OLD gradient (prev_flat_grad)
+
+        self.curvature_update(grad, eps, damping) # here grad is the NEW gradient from the line search procedure
+        
+        return F_new, grad, t, ls_step, closure_eval, grad_eval, desc_dir, fail
 
     def update_preconditioner(self, grad_tuple):
         """Update the Nystrom approximation of the Hessian.
