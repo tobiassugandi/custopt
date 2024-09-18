@@ -83,12 +83,19 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
     if not adaptive:
         return _nys_hess_approx(grad_tuple, rank0, _params_list, chunk_size, verbose, adaptive)
 
+    # adaptive rank selection
     l_k         = 999999.
     rank        = rank0
     rank_diff   = int(rank - 0)  # number of new sketch
     ome_T_prev  = None 
     Y_T_prev    = None
-    while l_k / mu > 10 and rank < max_rank:
+    
+    while l_k / mu > 10:
+        if rank > max_rank:
+            rank        = rank - rank_diff  # return to previous
+            rank_diff   = max_rank - rank
+            rank        = max_rank
+        
         U, S, ome_T_prev, Y_T_prev  = _nys_hess_approx(grad_tuple, rank_diff, _params_list, chunk_size, verbose, adaptive, ome_T_prev, Y_T_prev)
         l_k                         = S[-1]
         if verbose:
@@ -98,11 +105,9 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
         rank_prev                   = rank
         rank                        = int(rank * rank_mult)         # multiply the rank
         rank_diff                   = rank - rank_prev              # delta rank = rank, so doubles the rank
-        if rank > max_rank:
-            rank        = rank - rank_diff  # return to initial
-            rank_diff   = max_rank - rank
-            rank        = max_rank
 
+        if rank == max_rank:
+            break
 
     return U, S
 
