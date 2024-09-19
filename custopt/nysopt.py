@@ -101,13 +101,14 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
         if verbose:
             print(f'Rank = {rank}, l_k / mu = {l_k / mu}')
         
+        if rank == max_rank:
+            break
+        
         # next_iter
         rank_prev                   = rank
         rank                        = int(rank * rank_mult)         # multiply the rank
         rank_diff                   = rank - rank_prev              # delta rank = rank, so doubles the rank
 
-        if rank == max_rank:
-            break
 
     return U, S
 
