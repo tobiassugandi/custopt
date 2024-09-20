@@ -1362,3 +1362,134 @@ class FullOverlapLBFGS(LBFGS):
         state = self.state['global_state']
         # state["U"], state["S"] = _nys_hess_approx(grad_tuple, state["nys_rank"], self._params_list, state["nys_chunk_size"], state["nys_verbose"])
         state["U"], state["S"] = _adaptive_nys_hess_approx(grad_tuple, self._params_list, state["nys_chunk_size"], state["nys_verbose"], rank0 = state["nys_rank"], adaptive = state["nys_adaptive"], mu = state["nys_mu"], max_rank = state["nys_max_rank"])
+
+
+
+class FullOverlapLBFGS_standard(FullOverlapLBFGS):
+    """
+    Standard version: step() takes closure, update preconditioner in step()
+    Implements full-overlap L-BFGS algorithm. 
+    Can be used with mini-batches. 
+    Wraps the LBFGS optimizer. 
+    Calling step() for a mini-batch:
+        1) gO <= forward, backward, get gradient
+        2) d <= the two-loop recursion (g_S = g_O),
+        3) theta_new, g_Onew <= _step
+        4) update the curvature pair
+
+    Adapted the public code by: Hao-Jun Michael Shi and Dheevatsa Mudigere
+
+    Warnings:
+      . Does not support per-parameter options and parameter groups.
+      . All parameters have to be on a single device.
+
+    Inputs:
+        lr (float): steplength or learning rate (default: 1)
+        history_size (int): update history size (default: 10)
+        line_search (str): designates line search to use (default: 'Wolfe')
+            Options:
+                'None': uses steplength designated in algorithm
+                'Armijo': uses Armijo backtracking line search
+                'Wolfe': uses Armijo-Wolfe bracketing line search
+        dtype: data type (default: torch.float)
+        debug (bool): debugging mode
+
+    """
+
+    def __init__(self, params, lr=1, history_size=10, line_search='Wolfe', 
+                 dtype=torch.float, debug=False, 
+                 H0 = None, nys_mu = 1e-2, nys_rank=15, 
+                 nys_adaptive = True, nys_max_rank=100,
+                 nys_update_freq = 1, 
+                 ssbfgs = False):
+        super(FullOverlapLBFGS_standard, self).__init__(
+            params, lr, history_size, line_search, 
+            dtype, debug,
+            H0, nys_mu, nys_rank,
+            nys_adaptive, nys_max_rank,
+            ssbfgs)
+        
+        self.iter = 0
+        state = self.state['global_state']
+        state['nys_update_freq'] = nys_update_freq
+        
+
+    def step(self, closure):
+        """
+        Performs a single optimization step.
+
+        Inputs:
+            closure (callable): reevaluates model and returns function value
+            -----xxxxx------options (dict): contains options for performing line search (default: None)
+            
+        General Options:
+            'eps' (float): constant for curvature pair rejection or damping (default: 1e-2)
+            'damping' (bool): flag for using Powell damping (default: False)
+
+        Options for Armijo backtracking line search:
+            'closure' (callable): reevaluates model and returns function value
+            'current_loss' (tensor): objective value at current iterate (default: F(x_k))
+            'gtd' (tensor): inner product g_Ok'd in line search (default: g_Ok'd)
+            'eta' (tensor): factor for decreasing steplength > 0 (default: 2)
+            'c1' (tensor): sufficient decrease constant in (0, 1) (default: 1e-4)
+            'max_ls' (int): maximum number of line search steps permitted (default: 10)
+            'interpolate' (bool): flag for using interpolation (default: True)
+            'inplace' (bool): flag for inplace operations (default: True)
+            'ls_debug' (bool): debugging mode for line search
+
+        Options for Wolfe line search:
+            'closure' (callable): reevaluates model and returns function value
+            'current_loss' (tensor): objective value at current iterate (default: F(x_k))
+            'gtd' (tensor): inner product g_Ok'd in line search (default: g_Ok'd)
+            'eta' (float): factor for extrapolation (default: 2)
+            'c1' (float): sufficient decrease constant in (0, 1) (default: 1e-4)
+            'c2' (float): curvature condition constant in (0, 1) (default: 0.9)
+            'max_ls' (int): maximum number of line search steps permitted (default: 10)
+            'interpolate' (bool): flag for using interpolation (default: True)
+            'inplace' (bool): flag for inplace operations (default: True)
+            'ls_debug' (bool): debugging mode for line search
+
+        Outputs (depends on line search):
+          . No line search:
+                t (float): steplength
+          . Armijo backtracking line search:
+                F_new (tensor): loss function at new iterate
+                t (tensor): final steplength
+                ls_step (int): number of backtracks
+                closure_eval (int): number of closure evaluations
+                desc_dir (bool): descent direction flag
+                    True: p_k is descent direction with respect to the line search
+                    function
+                    False: p_k is not a descent direction with respect to the line
+                    search function
+                fail (bool): failure flag
+                    True: line search reached maximum number of iterations, failed
+                    False: line search succeeded
+          . Wolfe line search:
+                F_new (tensor): loss function at new iterate
+                g_new (tensor): gradient at new iterate
+                t (float): final steplength
+                ls_step (int): number of backtracks
+                closure_eval (int): number of closure evaluations
+                grad_eval (int): number of gradient evaluations
+                desc_dir (bool): descent direction flag
+                    True: p_k is descent direction with respect to the line search
+                    function
+                    False: p_k is not a descent direction with respect to the line
+                    search function
+                fail (bool): failure flag
+                    True: line search reached maximum number of iterations, failed
+                    False: line search succeeded
+
+        Notes:
+          . If encountering line search failure in the deterministic setting, one
+            should try increasing the maximum number of line search steps max_ls.
+
+        """
+        options = {'closure': closure}
+        state   = self.state['global_state']
+        if state['H0'] == "Nys" and self.iter % state["nys_update_freq"] == 0:
+            self.update_preconditioner(torch.autograd.grad(closure(), self._params_list, create_graph=True))
+        self.iter += 1
+        return super(FullOverlapLBFGS_standard, self).step(options)  
+
