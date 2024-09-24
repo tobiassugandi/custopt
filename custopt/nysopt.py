@@ -84,7 +84,7 @@ def _adaptive_nys_hess_approx(grad_tuple, _params_list, chunk_size, verbose, ran
         return _nys_hess_approx(grad_tuple, rank0, _params_list, chunk_size, verbose, adaptive)
 
     # adaptive rank selection
-    l_k         = 999999.
+    l_k         = 999999999999999.
     rank        = rank0
     rank_diff   = int(rank - 0)  # number of new sketch
     ome_T_prev  = None 
