@@ -1,3 +1,8 @@
+'''
+`Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+'''
+
 import torch
 from torch.optim import Optimizer
 from torch.func import vmap

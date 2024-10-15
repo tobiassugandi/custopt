@@ -1,3 +1,7 @@
+'''
+`Rathore et al. Challenges in Training PINNs: A Loss Landscape Perspective.
+    Preprint, 2024. <https://arxiv.org/abs/2402.01868>`
+'''
 from torch.optim import Adam, LBFGS, Optimizer
 from .nys_newton_cg import NysNewtonCG
 
