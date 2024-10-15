@@ -1,7 +1,7 @@
 Custopt includes a Pytorch implementation of Nys-LBFGS, a modified LBFGS optimization algorithm--using the randomized Nystrom approximation as the initial guess of the inverse Hessian approximation.
 
 ### Motivation 
-Enhance the quality of LBFGS's inverse Hessian approximation to better address ill-conditioned problems. Initially devised to mitigate the training issue in physics informed neural operators.
+To enhance the quality of LBFGS's inverse Hessian approximation to better address ill-conditioned problems. Initially devised to mitigate the training issue in physics informed neural operators.
 
 ### Variants 
 - Full batch
